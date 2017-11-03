@@ -19,10 +19,8 @@
     Reorganize indexes when fragmentation is above 50 and rebuild indexes when fragmentation is above 80 on a single server. Never rebuild online.
     .PARAMETER SqlServer
     The name of the single server to perform activities on. Valid options are {ServerName}, {ServerName\InstanceName} or {ServerName,PortNumber}
-    .PARAMETER CentralServer
-    The name of the central server to retrieve a list of servers. Valid options are {ServerName}, {ServerName\InstanceName} or {ServerName,PortNumber}
-    .PARAMETER UpdateStatistics
-    A switch to determine whether or not to update statistics.
+    .PARAMETER SqlCredential
+    A PSCredential that stores the user information when SQL authentication is used. For Windows authentication this parameter can be omitted.
     .PARAMETER RebuildIndexes
     A switch to determine whether or not to rebuild or reorganize indexes
     .PARAMETER DoNotRebuildOnline
