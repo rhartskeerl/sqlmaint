@@ -21,6 +21,8 @@
     The name of the single server to perform activities on. Valid options are {ServerName}, {ServerName\InstanceName} or {ServerName,PortNumber}
     .PARAMETER SqlCredential
     A PSCredential that stores the user information when SQL authentication is used. For Windows authentication this parameter can be omitted.
+    .PARAMETER UpdateStatistics
+    A switch to determine whether or not to update statistics
     .PARAMETER RebuildIndexes
     A switch to determine whether or not to rebuild or reorganize indexes
     .PARAMETER DoNotRebuildOnline
@@ -39,12 +41,16 @@
 #>
 [CmdletBinding()]
 Param (
-    [string]$SqlServer,
+    [string]$SqlServer = $env:COMPUTERNAME,
     [pscredential]$SqlCredential,
     [switch]$UpdateStatistics,
+    [ValidateRange(0,100)]
+    [int]$SamplePercent = 100,
     [switch]$RebuildIndexes,
     [switch]$DoNotRebuildOnline,
+    [ValidateRange(0,100)]
     [int]$LowWaterMark = 10,
+    [ValidateRange(0,100)]
     [int]$HighWaterMark = 30,
     [switch]$CheckDatabases,
     [switch]$BackupDatabases,
@@ -261,7 +267,7 @@ function StatsMaintenance {
     $stats = GetStatistics -connectionString $connectionString
 
     foreach ($stat in $stats) {
-        $QUERY_UPDATESTATS = "UPDATE STATISTICS [$($stat.schema_name)].[$($stat.object_name)] [$($stat.stats_name)] WITH FULLSCAN;"
+        $QUERY_UPDATESTATS = "UPDATE STATISTICS [$($stat.schema_name)].[$($stat.object_name)] [$($stat.stats_name)] WITH SAMPLE $SamplePercent PERCENT;"
 
         if ($stat.stats_rows -eq -1 -and $stat.row_count -gt 0) {
             Write-Log -Level CODE -Message $QUERY_UPDATESTATS
@@ -361,7 +367,7 @@ function BackupDatabase {
 
 ## Main Execution
 [string]$RUN_UID = [guid]::NewGuid().ToString()
-[string]$LOG_FILE = "$($PSScriptRoot)\sqlmaint_$($SqlServer)_$(Get-Date -Format yyyyMMdd).log"
+[string]$LOG_FILE = "$($PSScriptRoot)\sqlmaint_$($SqlServer.Replace('\','_'))_$(Get-Date -Format yyyyMMdd).log"
 
 Write-Log -Level INFO -Message "Starting SQL Maintenance ON $($SqlServer)"
 Write-Log -Level INFO -Message "Index Maintenance is set to: $($RebuildIndexes)"
@@ -371,13 +377,31 @@ Write-Log -Level INFO -Message "Database backup is set to $($BackupDatabases)"
 Write-Log -Level INFO -Message "Database backup path is set to $($BackupPath)"
 Write-Log -Level INFO -Message "The current directory is $PSScriptRoot"
 
-$CONNECTION = "Data Source=$($SqlServer);Initial Catalog=master;Integrated Security=SSPI;App=SqlMaintenance"
+if($LowWaterMark -gt $HighWaterMark) 
+{
+    Write-Log -Level INFO -Message "The low watermark is set higher then the high watermark. The "
+}
+if($SqlServer -ne $env:COMPUTERNAME -and $BackupDatabases)
+{
+    if($BackupPath -eq "" -or $BackupPath.Substring(1,2) -eq ":\")
+    {
+        Write-Host "Local backup path specified for remote computer. Backup operation will be skippped."
+        $BackupDatabases = $false;
+    }
+}
+$CONNECTION = "Data Source=$($SqlServer);Initial Catalog=master;Integrated Security=SSPI;Connection Timeout=5;App=SqlMaintenance"
 if($SqlCredential -ne $null)
 {
-    $CONNECTION = "Data Source=$($SqlServer);Initial Catalog=master;App=SqlMaintenance"
+    $CONNECTION = "Data Source=$($SqlServer);Initial Catalog=master;Connection Timeout=5;App=SqlMaintenance"
 }
 $serverDetails = GetServerDetails -connectionString $CONNECTION
 Write-Log -Level DEBG -Message "Version is $($serverDetails.ProductVersion) $($serverDetails.Edition)"
+if($serverDetails.ProductVersion -eq $null)
+{
+    Write-Log -Level FATL -Message "There was an error getting the information from the SQL Server. This process will exit."
+    $Host.SetShouldExit(1)
+    Exit
+}
 [int]$majorversion = ($serverDetails.ProductVersion.Split("."))[0]
 [bool]$isAzure = $false
 
@@ -385,7 +409,7 @@ if($serverDetails.Edition -like "*Azure*") { $isAzure = $true}
 
 $dbs = GetDatabases -connectionString $CONNECTION -system -majorversion $majorversion -Azure $isAzure
 foreach ($db in $dbs) {
-    $CONNECTION_DB = "Data Source=$($SqlServer);Initial Catalog=$($db.database_name);Integrated Security=SSPI;App=SqlMaintenance"
+    $CONNECTION_DB = "Data Source=$($SqlServer);Initial Catalog=$($db.database_name);Connection Timeout=5;Integrated Security=SSPI;App=SqlMaintenance"
     if($SqlCredential -ne $null)
     {
         $CONNECTION_DB = "Data Source=$($SqlServer);Initial Catalog=$($db.database_name);App=SqlMaintenance"
