@@ -1,6 +1,6 @@
-# SqlMaint
+# Sql Maintenance
 
-``` powershell
+``` Text
 Sql-Maintenance
     -SqlServer <string>
     [-SqlCredential <PSCredentail>]
@@ -89,7 +89,7 @@ Provides the upper threshold for a reorganize and the starting point for a rebui
 
 ### `-CheckDatabases`
 
-When provided runs DBCC CHECKDB on the database. 
+When provided runs DBCC CHECKDB on the database.
 
 ### `-BackupDatabases`
 
