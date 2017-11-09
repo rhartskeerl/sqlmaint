@@ -58,6 +58,11 @@ Param (
     [ValidateSet("Full", "Log", "Differential")]
     $BackupType = "Full"
 )
+#region Internal Constants
+[string]$ERROR_SERVER_INFORMATION = "Failed to retrieve server information. The process is exiting."
+[string]$ERROR_DATABASE_BACKUP = "There was an error creating the backup. Review the errorlog for more information."
+[string]$ERROR_DATABASE_CHECKDB = "There was an error running DBCC CHECKDB. Review the errorlog for more information."
+#endregion
 
 #region Internal Functions
 function ExecuteSqlQuery {
@@ -76,13 +81,21 @@ function ExecuteSqlQuery {
     $command = New-Object System.Data.SqlClient.SqlCommand($query, $connection)
     $command.CommandTimeout = 0
     $datatable = New-Object System.Data.DataTable
-    $connection.Open()
-    $datatable.Load($command.ExecuteReader())
-    $connection.Close()
+    try 
+    {
+        $connection.Open()
+        $datatable.Load($command.ExecuteReader())
+        $connection.Close()
+    }
+    catch 
+    {
+        throw $_.Exception
+    }
     return $datatable
+
 }
 
-Function Write-Log {
+Function WriteLog {
     Param(
     [ValidateSet("INFO","WARN","ERRO", "FATL", "DEBG", "CODE")]
     [string]$Level = "INFO",
@@ -92,15 +105,15 @@ Function Write-Log {
 
     $stamp = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
     $line = "$Stamp $Level $RUN_UID $Message"
-    If($LOG_FILE) {
-        Add-Content $LOG_FILE -Value $line
+    If($LogFile) {
+        Add-Content $LogFile -Value $line
         Write-Verbose $line
     }
     Else {
         switch ($Level) {
             "WARN" { Write-Warning $line}
-            "ERRO" { Write-Error $line}
-            "FATL" { Write-Error $line}
+            "ERRO" { Write-Error $line; $Script:ErrorCount++ }
+            "FATL" { Write-Error $line; $Script:ErrorCount++ }
             "DEBG" {Write-Debug $line}
             "INFO" {Write-Verbose $line}
             "CODE" {Write-Information $line}
@@ -125,12 +138,12 @@ function GetDatabases {
         [int]$majorversion = 99,
         [bool]$azure = $false
     )
-    [string]$QUERY_DATABASES = "SELECT dbs.database_id, dbs.name as database_name, dbs.compatibility_level, dbs.user_access, dbs.is_read_only, dbs.recovery_model,
+    [string]$QUERY_DATABASES = "SELECT dbs.database_id, dbs.name as database_name, dbs.compatibility_level, dbs.user_access, dbs.is_read_only, dbs.recovery_model_desc AS recovery_model,
 dbrs.database_guid, dbrs.last_log_backup_lsn,
 ISNULL((SELECT TOP 1 cluster_name FROM sys.dm_hadr_cluster) + '\' + ag.name, @@SERVERNAME) AS path_name, ISNULL(ags.primary_replica, @@SERVERNAME) AS primary_replica, ISNULL(ag.automated_backup_preference, 0) AS automated_backup_preference,
 ISNULL((SELECT TOP 1 replica_server_name FROM sys.availability_replicas WHERE replica_server_name != ags.primary_replica AND backup_priority > 0 ORDER BY backup_priority DESC, replica_server_name), @@SERVERNAME) AS preferred_secondary,
 ISNULL((SELECT TOP 1 replica_server_name FROM sys.availability_replicas WHERE backup_priority > 0 ORDER BY backup_priority DESC, replica_server_name), @@SERVERNAME) AS preferred_replica,
-@@SERVERNAME AS local_server_name, dbrs.*
+@@SERVERNAME AS local_server_name
 FROM sys.databases dbs
 INNER JOIN sys.database_recovery_status dbrs ON dbs.database_id = dbrs.database_id 
 LEFT JOIN sys.dm_hadr_database_replica_states drs ON dbs.group_database_id = drs.group_database_id AND drs.is_local = 1
@@ -140,7 +153,7 @@ WHERE dbs.state = 0;"
 
     if($azure)
     {
-        $QUERY_DATABASES = "SELECT dbs.database_id, dbs.name as database_name, dbs.compatibility_level, dbs.user_access, dbs.is_read_only, dbs.recovery_model,
+        $QUERY_DATABASES = "SELECT dbs.database_id, dbs.name as database_name, dbs.compatibility_level, dbs.user_access, dbs.is_read_only, dbs.recovery_model_desc AS recovery_model
 NEWID() AS database_guid,0 AS last_log_backup_lsn,
 @@SERVERNAME AS path_name, @@SERVERNAME AS primary_replica, 0 AS automated_backup_preference,
 @@SERVERNAME AS preferred_secondary,
@@ -225,7 +238,7 @@ function IndexMaintenance {
         $QUERY_REORGINDEX = "ALTER INDEX [$($index.index_name)] ON [$($index.schema_name)].[$($index.object_name)]"
         if ($index.avg_fragmentation_in_percent -gt $lowthreshold) {
             if ($index.avg_fragmentation_in_percent -lt $highthreshold) {
-                Write-Log -Level INFO -Message "Not hitting the threshold... $($index.avg_fragmentation_in_percent) $($highthreshold)"
+                WriteLog -Level INFO -Message "Not hitting the threshold... $($index.avg_fragmentation_in_percent) $($highthreshold)"
                 $QUERY_REORGINDEX += " REORGANIZE"
             }
             else {
@@ -251,7 +264,7 @@ function IndexMaintenance {
                 }
             }
 
-            Write-Log -Level CODE -Message $QUERY_REORGINDEX
+            WriteLog -Level CODE -Message $QUERY_REORGINDEX
             ExecuteSqlQuery -connectionString $connectionString -query $QUERY_REORGINDEX
         }
     }
@@ -270,7 +283,7 @@ function StatsMaintenance {
         $QUERY_UPDATESTATS = "UPDATE STATISTICS [$($stat.schema_name)].[$($stat.object_name)] [$($stat.stats_name)] WITH SAMPLE $SamplePercent PERCENT;"
 
         if ($stat.stats_rows -eq -1 -and $stat.row_count -gt 0) {
-            Write-Log -Level CODE -Message $QUERY_UPDATESTATS
+            WriteLog -Level CODE -Message $QUERY_UPDATESTATS
             ExecuteSqlQuery -connectionString $connectionString -query $QUERY_UPDATESTATS
         }
         elseif ($stat.stats_rows -ge 500 -and $stat.stats_modification_counter -gt 0 ) {
@@ -279,7 +292,7 @@ function StatsMaintenance {
             if ($donotuse2371) { $update_thresholdsqrt = $update_threshold}
 
             if ($stat.stats_modification_counter -gt $update_threshold -or $stat.stats_modification_counter -gt $update_thresholdsqrt) {
-                Write-Log -Level CODE -Message $QUERY_UPDATESTATS
+                WriteLog -Level CODE -Message $QUERY_UPDATESTATS
                 ExecuteSqlQuery -connectionString $connectionString -query $QUERY_UPDATESTATS
             }
         }
@@ -293,8 +306,16 @@ function ConsistencyCheck {
     )
 
     [string]$DBCC_CHECKDB = "DBCC CHECKDB ([$($database.database_name)]) WITH NO_INFOMSGS, PHYSICAL_ONLY;"
-    Write-Log -Level CODE -Message $DBCC_CHECKDB
-    ExecuteSqlQuery -connectionString $connectionString -query $DBCC_CHECKDB
+    WriteLog -Level CODE -Message $DBCC_CHECKDB
+    try
+    {
+        ExecuteSqlQuery -connectionString $connectionString -query $DBCC_CHECKDB
+    }
+    catch
+    {
+        WriteLog -Level ERRO -Message $ERROR_DATABASE_CHECKDB
+        WriteLog -Level DEBG -Message $_.Exception
+    }
 }
 
 function BackupDatabase {
@@ -305,12 +326,14 @@ function BackupDatabase {
 
     $folder = ("$($BackupPath)\$($database.path_name)\$($database.database_name)\").ToLower()
     if(!(Test-Path -Path $folder)) { $null = New-Item -Path $folder -ItemType Directory}
+    if(!(Test-Path -Path $folder)) { WriteLog -Level WARN -Message "There was an error creating the backuppath. Backups might fail."}
+
     $filename = ("$($folder)$($database.database_name)_$(Get-Date -Format yyyyMMddHHmmss)").ToLower()
     [string]$BACKUP_DATABASEFULL = "BACKUP DATABASE [$($database.database_name)] TO DISK = '$($filename)_FULL.bak'"
     [string]$BACKUP_DATABASELOG = "BACKUP LOG [$($database.database_name)] TO DISK = '$($filename)_LOG.bak'"
     [string]$BACKUP_DATABASEDIFF = "BACKUP DATABASE [$($database.database_name)] TO DISK = '$($filename)_DIFF.bak' WITH DIFFERENTIAL"
 
-    Write-Log -Level DEBG -Message "The current backuptype for database $($database.database_name) is $($BackupType) and the recoverymodel is $($database.recovery_model)"
+    WriteLog -Level DEBG -Message "The current backuptype for database $($database.database_name) is $($BackupType) and the recoverymodel is $($database.recovery_model)"
 
     [bool]$isPreferredBackup = $false
     [bool]$isPrimary = $false
@@ -328,26 +351,24 @@ function BackupDatabase {
         $type = "Full"
         ## A full backup is not present. To circumvent this we will create a full backup but only on the primary
         ## The backup preference is ignored
-        Write-Log -Level DEBG -Message "Database $($database.database_name) has no valid log backup yet. A full backup will be created first."
+        WriteLog -Level DEBG -Message "Database $($database.database_name) has no valid log backup yet. A full backup will be created first."
         if($isPrimary ) { $isPreferredBackup = $true} else {$isPreferredBackup = $false}
     }
-
+    [string]$sql = $BACKUP_DATABASEFULL
     switch ($type) {
         "Full"
         { 
             if($isPreferredBackup)
             {
                 if(!$isPrimary) { $BACKUP_DATABASEFULL += " WITH COPY_ONLY"}
-                Write-Log -Level CODE -Message $BACKUP_DATABASEFULL
-                ExecuteSqlQuery -connectionString $connectionString -query $BACKUP_DATABASEFULL
+                    $sql = $BACKUP_DATABASEFULL
             }
         }
         "Differential"
         {
             if($isPrimary -and $database.database_id -gt 1)
             {
-                Write-Log -Level CODE -Message $BACKUP_DATABASEDIFF
-                ExecuteSqlQuery -connectionString $connectionString -query $BACKUP_DATABASEDIFF
+                $sql = $BACKUP_DATABASEDIFF
             }
         }
         "Log"
@@ -357,29 +378,41 @@ function BackupDatabase {
 
                 if($isPreferredBackup)
                 {
-                    Write-Log -Level CODE -Message $BACKUP_DATABASELOG
-                    ExecuteSqlQuery -connectionString $connectionString -query $BACKUP_DATABASELOG
+                    $sql = $BACKUP_DATABASELOG
                 }
             }
         }
     }
+    WriteLog -Level CODE -Message $sql
+    try 
+    {
+        ExecuteSqlQuery -connectionString $connectionString -query $sql
+    }
+    catch 
+    {
+        WriteLog -Level ERRO -Message $ERROR_DATABASE_BACKUP
+        WriteLog -Level DEBG -Message $_.Exception.Message
+    }
 }
 
 ## Main Execution
-[string]$RUN_UID = [guid]::NewGuid().ToString()
-[string]$LOG_FILE = "$($PSScriptRoot)\sqlmaint_$($SqlServer.Replace('\','_'))_$(Get-Date -Format yyyyMMdd).log"
+[string]$RunUid = [guid]::NewGuid().ToString()
+[string]$LogFile = "$($PSScriptRoot)\sqlmaint_$($SqlServer.Replace('\','_'))_$(Get-Date -Format yyyyMMdd).log"
+[int]$ErrorCount = 0;
 
-Write-Log -Level INFO -Message "Starting SQL Maintenance ON $($SqlServer)"
-Write-Log -Level INFO -Message "Index Maintenance is set to: $($RebuildIndexes)"
-Write-Log -Level INFO -Message "Statistics Maintenance is set to: $($UpdateStatistics)"
-Write-Log -Level INFO -Message "Database consistency check is set to $($CheckDatabases)"
-Write-Log -Level INFO -Message "Database backup is set to $($BackupDatabases)"
-Write-Log -Level INFO -Message "Database backup path is set to $($BackupPath)"
-Write-Log -Level INFO -Message "The current directory is $PSScriptRoot"
+WriteLog -Level INFO -Message "Starting SQL Maintenance ON $($SqlServer)"
+WriteLog -Level INFO -Message "Index Maintenance is set to: $($RebuildIndexes)"
+WriteLog -Level INFO -Message "Statistics Maintenance is set to: $($UpdateStatistics)"
+WriteLog -Level INFO -Message "Database consistency check is set to $($CheckDatabases)"
+WriteLog -Level INFO -Message "Database backup is set to $($BackupDatabases)"
+WriteLog -Level INFO -Message "Database backup path is set to $($BackupPath)"
+WriteLog -Level INFO -Message "The current directory is $PSScriptRoot"
 
 if($LowWaterMark -gt $HighWaterMark) 
 {
-    Write-Log -Level INFO -Message "The low watermark is set higher then the high watermark. The "
+    WriteLog -Level INFO -Message "The low watermark is set higher then the high watermark. The default values will be used."
+    $LowWaterMark = 10
+    $HighWaterMark = 30
 }
 if($SqlServer -ne $env:COMPUTERNAME -and $BackupDatabases)
 {
@@ -395,10 +428,10 @@ if($SqlCredential -ne $null)
     $CONNECTION = "Data Source=$($SqlServer);Initial Catalog=master;Connection Timeout=5;App=SqlMaintenance"
 }
 $serverDetails = GetServerDetails -connectionString $CONNECTION
-Write-Log -Level DEBG -Message "Version is $($serverDetails.ProductVersion) $($serverDetails.Edition)"
+WriteLog -Level DEBG -Message "Version is $($serverDetails.ProductVersion) $($serverDetails.Edition)"
 if($serverDetails.ProductVersion -eq $null)
 {
-    Write-Log -Level FATL -Message "There was an error getting the information from the SQL Server. This process will exit."
+    WriteLog -Level FATL -Message $ERROR_SERVER_INFORMATION
     $Host.SetShouldExit(1)
     Exit
 }
@@ -425,7 +458,7 @@ foreach ($db in $dbs) {
     if($CheckDatabases -and $db.database_id -ne 2 -and $db.primary_replica -eq $db.local_server_name) {
         if($db.database_id -eq 1 -and $isAzure)
         {
-            Write-Log -Level INFO -Message "Cannot perform DBCC CHECKDB on master database in Azure."
+            WriteLog -Level INFO -Message "Cannot perform DBCC CHECKDB on master database in Azure."
         }
         else
         {
@@ -436,11 +469,17 @@ foreach ($db in $dbs) {
     if($BackupDatabases -and $db.database_id -ne 2) {
         if($isAzure)
         {
-            Write-Log -Level INFO -Message "Skipping backup. Database is on Azure and backup is not supported."
+            WriteLog -Level INFO -Message "Skipping backup. Database is on Azure and backup is not supported."
         }
         else {
             BackupDatabase -connectionString $CONNECTION -database $db
         }
     }
 }
-Write-Log -Level INFO -Message "Finished SQL Maintenance"
+if($ErrorCount -gt 0) 
+{
+    WriteLog -Level INFO -Message "Finished SQL Maintenance with $($ErrorCount) errors"
+    $Host.SetShouldExit(2)
+    Exit
+}
+WriteLog -Level INFO -Message "Finished SQL Maintenance"

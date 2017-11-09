@@ -31,7 +31,7 @@ The following tasks can be performed.
 
 ### Example 1: Create a full backup on all databases on CONTOSO1
 
-``` powershell
+```
 Sql-Maintenance -SqlServer CONTOSO1 -BackupDatabases -BackupPath C:\backup -BackupType Full
 ```
 
@@ -39,7 +39,7 @@ This command connects to server CONTOSO1 using Windows authentication and backup
 
 ### Example 2: Perform consistency checks on all databases on CONTOSO1
 
-``` powershell
+```
 Sql-Maintenance -SqlServer CONTOSO1 -CheckDatabases
 ```
 
@@ -47,7 +47,7 @@ This command does a consistency check on all databases.
 
 ### Example 3: Perform index and statistics maintenance on all databases on CONTOSO1
 
-``` powershell
+```
 Sql-Maintenance -SqlServer CONTOSO1 -RebuildIndexes -UpdateStatistics
 ```
 
