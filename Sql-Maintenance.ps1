@@ -21,6 +21,10 @@
     The name of the single server to perform activities on. Valid options are {ServerName}, {ServerName\InstanceName} or {ServerName,PortNumber}
     .PARAMETER SqlCredential
     A PSCredential that stores the user information when SQL authentication is used. For Windows authentication this parameter can be omitted.
+    .PARAMETER Include
+    An array of databasenames that are included in the tasks. Other databases are skipped. System databases can be added with the alias 'system'. When exclude is specified include has no effect.
+    .PARAMETER Exclude
+    An array of databasenames that are excluded in the tasks. System databases can be added with the alias 'system'.
     .PARAMETER UpdateStatistics
     A switch to determine whether or not to update statistics
     .PARAMETER RebuildIndexes
@@ -43,6 +47,8 @@
 Param (
     [string]$SqlServer = $env:COMPUTERNAME,
     [pscredential]$SqlCredential,
+    [string[]]$Exclude,
+    [string[]]$Include,
     [switch]$UpdateStatistics,
     [ValidateRange(0,100)]
     [int]$SamplePercent = 100,
@@ -138,7 +144,7 @@ function GetDatabases {
         [int]$majorversion = 99,
         [bool]$azure = $false
     )
-    [string]$QUERY_DATABASES = "SELECT dbs.database_id, dbs.name as database_name, dbs.compatibility_level, dbs.user_access, dbs.is_read_only, dbs.recovery_model_desc AS recovery_model,
+    [string]$QUERY_DATABASES = "SELECT dbs.database_id, dbs.name as database_name, dbs.compatibility_level, dbs.user_access, dbs.is_read_only, dbs.recovery_model, dbs.recovery_model_desc,
 dbrs.database_guid, dbrs.last_log_backup_lsn,
 ISNULL((SELECT TOP 1 cluster_name FROM sys.dm_hadr_cluster) + '\' + ag.name, @@SERVERNAME) AS path_name, ISNULL(ags.primary_replica, @@SERVERNAME) AS primary_replica, ISNULL(ag.automated_backup_preference, 0) AS automated_backup_preference,
 ISNULL((SELECT TOP 1 replica_server_name FROM sys.availability_replicas WHERE replica_server_name != ags.primary_replica AND backup_priority > 0 ORDER BY backup_priority DESC, replica_server_name), @@SERVERNAME) AS preferred_secondary,
@@ -153,7 +159,7 @@ WHERE dbs.state = 0;"
 
     if($azure)
     {
-        $QUERY_DATABASES = "SELECT dbs.database_id, dbs.name as database_name, dbs.compatibility_level, dbs.user_access, dbs.is_read_only, dbs.recovery_model_desc AS recovery_model
+        $QUERY_DATABASES = "SELECT dbs.database_id, dbs.name as database_name, dbs.compatibility_level, dbs.user_access, dbs.is_read_only, dbs.recovery_model, dbs_recovery_model_desc,
 NEWID() AS database_guid,0 AS last_log_backup_lsn,
 @@SERVERNAME AS path_name, @@SERVERNAME AS primary_replica, 0 AS automated_backup_preference,
 @@SERVERNAME AS preferred_secondary,
@@ -414,14 +420,7 @@ if($LowWaterMark -gt $HighWaterMark)
     $LowWaterMark = 10
     $HighWaterMark = 30
 }
-if($SqlServer -ne $env:COMPUTERNAME -and $BackupDatabases)
-{
-    if($BackupPath -eq "" -or $BackupPath.Substring(1,2) -eq ":\")
-    {
-        Write-Host "Local backup path specified for remote computer. Backup operation will be skippped."
-        $BackupDatabases = $false;
-    }
-}
+
 $CONNECTION = "Data Source=$($SqlServer);Initial Catalog=master;Integrated Security=SSPI;Connection Timeout=5;App=SqlMaintenance"
 if($SqlCredential -ne $null)
 {
@@ -439,40 +438,65 @@ if($serverDetails.ProductVersion -eq $null)
 [bool]$isAzure = $false
 
 if($serverDetails.Edition -like "*Azure*") { $isAzure = $true}
+if($Include.Count -gt 0 -and $Exclude.Count -gt 0)
+{
+    WriteLog -Level INFO -Message "The inclusion list is ignored because there is also an exclusion list."
+}
+
 
 $dbs = GetDatabases -connectionString $CONNECTION -system -majorversion $majorversion -Azure $isAzure
 foreach ($db in $dbs) {
-    $CONNECTION_DB = "Data Source=$($SqlServer);Initial Catalog=$($db.database_name);Connection Timeout=5;Integrated Security=SSPI;App=SqlMaintenance"
-    if($SqlCredential -ne $null)
+    [bool]$skip = $false
+    if($Exclude.Count -gt 0)
     {
-        $CONNECTION_DB = "Data Source=$($SqlServer);Initial Catalog=$($db.database_name);App=SqlMaintenance"
-    }
-    if ($RebuildIndexes -and $db.database_id -gt 4 -and $db.primary_replica -eq $db.local_server_name) {
-        IndexMaintenance -connectionString $CONNECTION_DB -lowthreshold $LowWaterMark -highthreshold $HighWaterMark 
-    }
-
-    if ($UpdateStatistics -and $db.database_id -gt 4 -and $db.primary_replica -eq $db.local_server_name) {
-        StatsMaintenance -connectionString $CONNECTION_DB
-    }
-
-    if($CheckDatabases -and $db.database_id -ne 2 -and $db.primary_replica -eq $db.local_server_name) {
-        if($db.database_id -eq 1 -and $isAzure)
+        if($Exclude -Contains $db.database_name -or ($Exclude -Contains 'system' -and $db.database_id -lt 5))
         {
-            WriteLog -Level INFO -Message "Cannot perform DBCC CHECKDB on master database in Azure."
-        }
-        else
-        {
-            ConsistencyCheck -connectionString $CONNECTION_DB -database $db
+            WriteLog -Level INFO -Message "Database $($db.database_name) is skipped because it is in an exclusion list."
+            $skip = $true
         }
     }
-
-    if($BackupDatabases -and $db.database_id -ne 2) {
-        if($isAzure)
+    else 
+    {
+        if($Include.Count -gt 0 -and (!($include -Contains $db.database_name) -and ($include -Contains 'system' -and $db.database_id -gt 4)))
         {
-            WriteLog -Level INFO -Message "Skipping backup. Database is on Azure and backup is not supported."
+            WriteLog -Level INFO -Message "Database $($db.database_name) is skipped because it is not in the included list."
+            $skip = $true
         }
-        else {
-            BackupDatabase -connectionString $CONNECTION -database $db
+    }
+    if(!$skip)
+    {
+        $CONNECTION_DB = "Data Source=$($SqlServer);Initial Catalog=$($db.database_name);Connection Timeout=5;Integrated Security=SSPI;App=SqlMaintenance"
+        if($SqlCredential -ne $null)
+        {
+            $CONNECTION_DB = "Data Source=$($SqlServer);Initial Catalog=$($db.database_name);App=SqlMaintenance"
+        }
+        if ($RebuildIndexes -and $db.database_id -gt 4 -and $db.primary_replica -eq $db.local_server_name) {
+            IndexMaintenance -connectionString $CONNECTION_DB -lowthreshold $LowWaterMark -highthreshold $HighWaterMark 
+        }
+
+        if ($UpdateStatistics -and $db.database_id -gt 4 -and $db.primary_replica -eq $db.local_server_name) {
+            StatsMaintenance -connectionString $CONNECTION_DB
+        }
+
+        if($CheckDatabases -and $db.database_id -ne 2 -and $db.primary_replica -eq $db.local_server_name) {
+            if($db.database_id -eq 1 -and $isAzure)
+            {
+                WriteLog -Level INFO -Message "Cannot perform DBCC CHECKDB on master database in Azure."
+            }
+            else
+            {
+                ConsistencyCheck -connectionString $CONNECTION_DB -database $db
+            }
+        }
+
+        if($BackupDatabases -and $db.database_id -ne 2) {
+            if($isAzure)
+            {
+                WriteLog -Level INFO -Message "Skipping backup. Database is on Azure and backup is not supported."
+            }
+            else {
+                BackupDatabase -connectionString $CONNECTION -database $db
+            }
         }
     }
 }

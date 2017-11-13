@@ -4,6 +4,8 @@
 Sql-Maintenance
     -SqlServer <string>
     [-SqlCredential <PSCredentail>]
+    [-Include <string[]>]
+    [-Exclude <string[]>]
     [-UpdateStatistics]
     [-SamplePercent <int>]
     [-RebuildIndexes]
@@ -57,11 +59,19 @@ This command will rebuild indexes when needed and then update statistics where n
 
 ### `-SqlServer`
 
-Specifies the server to connect to. This can be the name, name\instance or name.fqdn.
+Specifies the server to connect to. This can be the name, name\instance or name.fqdn. The default is the current computername.
 
 ### `-SqlCredential`
 
 In case of SQL authentication a username and password must be provided.
+
+### `-Include`
+
+Specify a list of databases to include. The system databases can be referenced using 'system' as database name. When exclude is specified include has no effect.
+
+### `-Exclude`
+
+Specify a list of databases to exclude. The systemdatabases can be referenced using 'system' as database name.
 
 ### `-UpdateStatistics`
 
