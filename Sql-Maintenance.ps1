@@ -47,6 +47,8 @@
 Param (
     [string]$SqlServer = $env:COMPUTERNAME,
     [pscredential]$SqlCredential,
+    [string]$SqlUser,
+    [string]$SqlPassword,
     [string[]]$Exclude,
     [string[]]$Include,
     [switch]$UpdateStatistics,
@@ -77,9 +79,17 @@ function ExecuteSqlQuery {
         [string]$query
     )
 
+    if($SqlUser -eq $null)
+    {
+        $connectionString += ";Integrated Security=SSPI"
+    }
+    else 
+    {
+        $connectionString += ";User Id=$($SqlUser);Password=$($SqlPassword)"
+    }
     $connection = New-Object System.Data.SqlClient.SqlConnection($connectionString)
+    
     if($SqlCredential -ne $null) {
-        #$Login = New-Object System.Management.Automation.PSCredential -ArgumentList $SqlUser, $Password
         $SqlCredential.Password.MakeReadOnly()
         $sqlCred = New-Object System.Data.SqlClient.SqlCredential($SqlCredential.UserName, $SqlCredential.Password)
         $connection.Credential = $sqlCred
@@ -421,11 +431,8 @@ if($LowWaterMark -gt $HighWaterMark)
     $HighWaterMark = 30
 }
 
-$CONNECTION = "Data Source=$($SqlServer);Initial Catalog=master;Integrated Security=SSPI;Connection Timeout=5;App=SqlMaintenance"
-if($SqlCredential -ne $null)
-{
-    $CONNECTION = "Data Source=$($SqlServer);Initial Catalog=master;Connection Timeout=5;App=SqlMaintenance"
-}
+$CONNECTION = "Data Source=$($SqlServer);Initial Catalog=master;Connection Timeout=5;App=SqlMaintenance"
+
 $serverDetails = GetServerDetails -connectionString $CONNECTION
 WriteLog -Level DEBG -Message "Version is $($serverDetails.ProductVersion) $($serverDetails.Edition)"
 if($serverDetails.ProductVersion -eq $null)
@@ -465,11 +472,8 @@ foreach ($db in $dbs) {
     }
     if(!$skip)
     {
-        $CONNECTION_DB = "Data Source=$($SqlServer);Initial Catalog=$($db.database_name);Connection Timeout=5;Integrated Security=SSPI;App=SqlMaintenance"
-        if($SqlCredential -ne $null)
-        {
-            $CONNECTION_DB = "Data Source=$($SqlServer);Initial Catalog=$($db.database_name);App=SqlMaintenance"
-        }
+        $CONNECTION_DB = "Data Source=$($SqlServer);Initial Catalog=$($db.database_name);Connection Timeout=5;App=SqlMaintenance"
+
         if ($RebuildIndexes -and $db.database_id -gt 4 -and $db.primary_replica -eq $db.local_server_name) {
             IndexMaintenance -connectionString $CONNECTION_DB -lowthreshold $LowWaterMark -highthreshold $HighWaterMark 
         }
