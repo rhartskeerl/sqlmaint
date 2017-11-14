@@ -3,7 +3,6 @@
     Perform common maintenance tasks like DBCC CHECKDB or rebuild indexes on SQL Server
     .DESCRIPTION
     This script can perform several maintenance tasks on SQL Server.
-
     The tasks it can perform are conditionally rebuilding or reorganizing indexes when needed. Statistics that need an update can be updated. It can also take care of consistency checks and database backups.
     .EXAMPLE
     Sql-Maintenance -SqlServer CONTOSO1 -UpdateStatistics -RebuildIndexes -CheckDatabases -BackupDatabases -BackupPath C:\backup -BackupType Full
@@ -21,6 +20,10 @@
     The name of the single server to perform activities on. Valid options are {ServerName}, {ServerName\InstanceName} or {ServerName,PortNumber}
     .PARAMETER SqlCredential
     A PSCredential that stores the user information when SQL authentication is used. For Windows authentication this parameter can be omitted.
+    .PARAMETER SqlUser
+    At the moment the SqlCredential doesn't work on Linux PowerShell because the library is not implemented. As a workaround you can use this parameter to pass the SQL user.
+    .PARAMETER SqlPassword
+    At the moment the SqlCredential doesn't work on Linux PowerShell because the library is not implemented. As a workaround you can use this parameter to pass the password.
     .PARAMETER Include
     An array of databasenames that are included in the tasks. Other databases are skipped. System databases can be added with the alias 'system'. When exclude is specified include has no effect.
     .PARAMETER Exclude
@@ -340,11 +343,12 @@ function BackupDatabase {
         $database
     )
 
-    $folder = ("$($BackupPath)\$($database.path_name)\$($database.database_name)\").ToLower()
+    $folder = "$($BackupPath)\" + ("$($database.path_name)\$($database.database_name)\").ToLower()
+    if($IsWindows -eq $false) {$folder = $folder.Replace("\","/")}
     if(!(Test-Path -Path $folder)) { $null = New-Item -Path $folder -ItemType Directory}
     if(!(Test-Path -Path $folder)) { WriteLog -Level WARN -Message "There was an error creating the backuppath. Backups might fail."}
 
-    $filename = ("$($folder)$($database.database_name)_$(Get-Date -Format yyyyMMddHHmmss)").ToLower()
+    $filename = "$($folder)" + ("$($database.database_name)_$(Get-Date -Format yyyyMMddHHmmss)").ToLower()
     [string]$BACKUP_DATABASEFULL = "BACKUP DATABASE [$($database.database_name)] TO DISK = '$($filename)_FULL.bak'"
     [string]$BACKUP_DATABASELOG = "BACKUP LOG [$($database.database_name)] TO DISK = '$($filename)_LOG.bak'"
     [string]$BACKUP_DATABASEDIFF = "BACKUP DATABASE [$($database.database_name)] TO DISK = '$($filename)_DIFF.bak' WITH DIFFERENTIAL"
@@ -414,7 +418,10 @@ function BackupDatabase {
 ## Main Execution
 [string]$RunUid = [guid]::NewGuid().ToString()
 [string]$LogFile = "$($PSScriptRoot)\sqlmaint_$($SqlServer.Replace('\','_'))_$(Get-Date -Format yyyyMMdd).log"
+[bool]$IsWindows = $true
 [int]$ErrorCount = 0;
+
+if($PSVersionTable.Plaftorm -ne $null) { $IsWindows = $false}
 
 WriteLog -Level INFO -Message "Starting SQL Maintenance ON $($SqlServer)"
 WriteLog -Level INFO -Message "Index Maintenance is set to: $($RebuildIndexes)"
