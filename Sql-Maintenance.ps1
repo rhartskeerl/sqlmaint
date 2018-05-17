@@ -98,31 +98,32 @@ function ExecuteSqlQuery {
         throw $_.Exception
     }
     return $datatable
-
 }
 
 Function WriteLog {
     Param(
-    [ValidateSet("INFO","WARN","ERRO", "FATL", "DEBG", "CODE")]
-    [string]$Level = "INFO",
-    [Parameter(Mandatory=$True)]
-    [string]$Message
+        [ValidateSet("INFO","WARN","ERRO", "FATL", "DEBG", "CODE")]
+        [string]$Level = "INFO",
+        [Parameter(Mandatory=$True)]
+        [string]$Message
     )
 
     $stamp = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
     $line = "$Stamp $Level $RUN_UID $Message"
-    If($LogFile) {
+    If($LogFile) 
+    {
         Add-Content $LogFile -Value $line
         Write-Verbose $line
     }
-    Else {
+    Else 
+    {
         switch ($Level) {
             "WARN" { Write-Warning $line}
             "ERRO" { Write-Error $line; $Script:ErrorCount++ }
             "FATL" { Write-Error $line; $Script:ErrorCount++ }
-            "DEBG" {Write-Debug $line}
-            "INFO" {Write-Verbose $line}
-            "CODE" {Write-Information $line}
+            "DEBG" { Write-Debug $line}
+            "INFO" { Write-Verbose $line}
+            "CODE" { Write-Information $line}
         }
     }
 }
@@ -144,12 +145,23 @@ function GetDatabases {
         [int]$majorversion = 99,
         [bool]$azure = $false
     )
-    [string]$QUERY_DATABASES = "SELECT dbs.database_id, dbs.name as database_name, dbs.compatibility_level, dbs.user_access, dbs.is_read_only, dbs.recovery_model, dbs.recovery_model_desc,
-dbrs.database_guid, dbrs.last_log_backup_lsn,
-ISNULL((SELECT TOP 1 cluster_name FROM sys.dm_hadr_cluster) + '\' + ag.name, @@SERVERNAME) AS path_name, ISNULL(ags.primary_replica, @@SERVERNAME) AS primary_replica, ISNULL(ag.automated_backup_preference, 0) AS automated_backup_preference,
-ISNULL((SELECT TOP 1 replica_server_name FROM sys.availability_replicas WHERE replica_server_name != ags.primary_replica AND backup_priority > 0 ORDER BY backup_priority DESC, replica_server_name), @@SERVERNAME) AS preferred_secondary,
-ISNULL((SELECT TOP 1 replica_server_name FROM sys.availability_replicas WHERE backup_priority > 0 ORDER BY backup_priority DESC, replica_server_name), @@SERVERNAME) AS preferred_replica,
-@@SERVERNAME AS local_server_name
+    [string]$QUERY_DATABASES = "SELECT 
+	dbs.database_id, 
+	dbs.name as database_name, 
+	dbs.compatibility_level, 
+	dbs.user_access, 
+	dbs.is_read_only, 
+	dbs.recovery_model, 
+	dbs.recovery_model_desc,
+	dbrs.database_guid, 
+	dbrs.last_log_backup_lsn,
+	ISNULL((SELECT TOP 1 cluster_name FROM sys.dm_hadr_cluster) + '\' + ag.name, @@SERVERNAME) AS path_name, 
+	ISNULL(ags.primary_replica, @@SERVERNAME) AS primary_replica, 
+	ISNULL(ag.automated_backup_preference, 0) AS automated_backup_preference,
+	CASE WHEN ISNULL(ags.primary_replica, @@SERVERNAME) = @@SERVERNAME THEN 1 ELSE 0 END AS is_primary,
+	sys.fn_hadr_backup_is_preferred_replica(dbs.name) AS preferred_replica,
+	ISNULL(drs.synchronization_health, 255) AS synchronization_health,
+	@@SERVERNAME AS local_server_name
 FROM sys.databases dbs
 INNER JOIN sys.database_recovery_status dbrs ON dbs.database_id = dbrs.database_id 
 LEFT JOIN sys.dm_hadr_database_replica_states drs ON dbs.group_database_id = drs.group_database_id AND drs.is_local = 1
@@ -159,11 +171,12 @@ WHERE dbs.state = 0;"
 
     if($azure)
     {
-        $QUERY_DATABASES = "SELECT dbs.database_id, dbs.name as database_name, dbs.compatibility_level, dbs.user_access, dbs.is_read_only, dbs.recovery_model, dbs_recovery_model_desc,
+        $QUERY_DATABASES = "SELECT dbs.database_id, dbs.name as database_name, dbs.compatibility_level, dbs.user_access, dbs.is_read_only, dbs.recovery_model, dbs.recovery_model_desc,
 NEWID() AS database_guid,0 AS last_log_backup_lsn,
 @@SERVERNAME AS path_name, @@SERVERNAME AS primary_replica, 0 AS automated_backup_preference,
-@@SERVERNAME AS preferred_secondary,
-@@SERVERNAME AS preferred_replica,
+1 AS is_primary,
+1 AS preferred_replica,
+255 AS synchronization_health,
 @@SERVERNAME AS local_server_name 
 FROM sys.databases dbs"
     }
@@ -339,40 +352,34 @@ function BackupDatabase {
     [string]$BACKUP_DATABASELOG = "BACKUP LOG [$($database.database_name)] TO DISK = '$($filename)_LOG.bak'"
     [string]$BACKUP_DATABASEDIFF = "BACKUP DATABASE [$($database.database_name)] TO DISK = '$($filename)_DIFF.bak' WITH DIFFERENTIAL"
 
-    WriteLog -Level DEBG -Message "The current backuptype for database $($database.database_name) is $($BackupType) and the recoverymodel is $($database.recovery_model)"
+    WriteLog -Level DEBG -Message "The current backuptype for database $($database.database_name) is $($BackupType) and the recoverymodel is $($database.recovery_model)."
+    WriteLog -Level INFO -Message "The current synchronization health for database $($database.database_name) is $($database.synchronization_health)."
 
-    [bool]$isPreferredBackup = $false
-    [bool]$isPrimary = $false
+    [string]$type = $BackupType
+    [bool]$isPreferredBackup = $database.preferred_replica
 
-    if($database.primary_replica -eq $database.local_server_name) {$isPrimary = $true}
-
-    if($database.automated_backup_preference -eq 0 -and $isPrimary) {$isPreferredBackup = $true}
-    if($database.automated_backup_preference -eq 1 -and $database.preferred_secondary -eq $database.local_server_name) {$isPreferredBackup = $true}
-    if($database.automated_backup_preference -eq 2 -and $database.preferred_secondary -eq $database.local_server_name) {$isPreferredBackup = $true}
-    if($database.automated_backup_preference -eq 3 -and $database.preferred_replica -eq $database.local_server_name) {$isPreferredBackup = $true}
-
-    $type = $BackupType
     if($database.last_log_backup_lsn.ToString() -eq "" -and $database.recovery_model -ne 3)
     {
         $type = "Full"
         ## A full backup is not present. To circumvent this we will create a full backup but only on the primary
         ## The backup preference is ignored
         WriteLog -Level DEBG -Message "Database $($database.database_name) has no valid log backup yet. A full backup will be created first."
-        if($isPrimary ) { $isPreferredBackup = $true} else {$isPreferredBackup = $false}
+        if($database.is_primary ) { $isPreferredBackup = $true} else {$isPreferredBackup = $false}
     }
     [string]$sql = $BACKUP_DATABASEFULL
     switch ($type) {
-        "Full"
-        { 
-            if($isPreferredBackup)
-            {
-                if(!$isPrimary) { $BACKUP_DATABASEFULL += " WITH COPY_ONLY"}
-                    $sql = $BACKUP_DATABASEFULL
+        "Full" { 
+            if($isPreferredBackup) {
+                if(!$database.is_primary) { 
+                    $sql += " WITH COPY_ONLY"
+                }
+            }
+            else {
+                WriteLog -Level INFO -Message "Skipping database $($database.database_name) because it is not the preferred backup replica."
             }
         }
-        "Differential"
-        {
-            if($isPrimary -and $database.database_id -gt 1)
+        "Differential" {
+            if($database.is_primary -and $database.database_id -gt 1)
             {
                 $sql = $BACKUP_DATABASEDIFF
             }
@@ -389,10 +396,14 @@ function BackupDatabase {
             }
         }
     }
-    WriteLog -Level CODE -Message $sql
+
     try 
     {
-        ExecuteSqlQuery -connectionString $connectionString -query $sql
+        if($database.preferred_replica)
+        {
+            WriteLog -Level CODE -Message $sql
+            ExecuteSqlQuery -connectionString $connectionString -query $sql
+        }
     }
     catch 
     {
@@ -400,6 +411,7 @@ function BackupDatabase {
         WriteLog -Level DEBG -Message $_.Exception.Message
     }
 }
+
 
 ## Main Execution
 [string]$RunUid = [guid]::NewGuid().ToString()
@@ -443,7 +455,6 @@ if($Include.Count -gt 0 -and $Exclude.Count -gt 0)
     WriteLog -Level INFO -Message "The inclusion list is ignored because there is also an exclusion list."
 }
 
-
 $dbs = GetDatabases -connectionString $CONNECTION -system -majorversion $majorversion -Azure $isAzure
 foreach ($db in $dbs) {
     [bool]$skip = $false
@@ -465,16 +476,20 @@ foreach ($db in $dbs) {
     }
     if(!$skip)
     {
+        WriteLog -Level INFO -Message "Changing database context to $($db.database_name)."
+        WriteLog -Level CODE -Message "USE [$($db.database_name)]"
         $CONNECTION_DB = "Data Source=$($SqlServer);Initial Catalog=$($db.database_name);Connection Timeout=5;Integrated Security=SSPI;App=SqlMaintenance"
         if($SqlCredential -ne $null)
         {
             $CONNECTION_DB = "Data Source=$($SqlServer);Initial Catalog=$($db.database_name);App=SqlMaintenance"
         }
-        if ($RebuildIndexes -and $db.database_id -gt 4 -and $db.primary_replica -eq $db.local_server_name) {
+        if ($RebuildIndexes -and $db.database_id -gt 4 -and $db.primary_replica -eq $db.local_server_name) 
+        {
             IndexMaintenance -connectionString $CONNECTION_DB -lowthreshold $LowWaterMark -highthreshold $HighWaterMark 
         }
 
-        if ($UpdateStatistics -and $db.database_id -gt 4 -and $db.primary_replica -eq $db.local_server_name) {
+        if ($UpdateStatistics -and $db.database_id -gt 4 -and $db.primary_replica -eq $db.local_server_name) 
+        {
             StatsMaintenance -connectionString $CONNECTION_DB
         }
 
@@ -489,12 +504,14 @@ foreach ($db in $dbs) {
             }
         }
 
-        if($BackupDatabases -and $db.database_id -ne 2) {
+        if($BackupDatabases -and $db.database_id -ne 2) 
+        {
             if($isAzure)
             {
                 WriteLog -Level INFO -Message "Skipping backup. Database is on Azure and backup is not supported."
             }
-            else {
+            else 
+            {
                 BackupDatabase -connectionString $CONNECTION -database $db
             }
         }
