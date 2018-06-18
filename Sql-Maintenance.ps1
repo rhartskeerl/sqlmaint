@@ -46,17 +46,18 @@
 [CmdletBinding()]
 Param (
     [string]$SqlServer = $env:COMPUTERNAME,
+    [string]$LogPath,
     [pscredential]$SqlCredential,
     [string[]]$Exclude,
     [string[]]$Include,
     [switch]$UpdateStatistics,
-    [ValidateRange(0,100)]
+    [ValidateRange(0, 100)]
     [int]$SamplePercent = 100,
     [switch]$RebuildIndexes,
     [switch]$DoNotRebuildOnline,
-    [ValidateRange(0,100)]
+    [ValidateRange(0, 100)]
     [int]$LowWaterMark = 10,
-    [ValidateRange(0,100)]
+    [ValidateRange(0, 100)]
     [int]$HighWaterMark = 30,
     [switch]$CheckDatabases,
     [switch]$BackupDatabases,
@@ -78,7 +79,7 @@ function ExecuteSqlQuery {
     )
 
     $connection = New-Object System.Data.SqlClient.SqlConnection($connectionString)
-    if($SqlCredential -ne $null) {
+    if ($SqlCredential -ne $null) {
         #$Login = New-Object System.Management.Automation.PSCredential -ArgumentList $SqlUser, $Password
         $SqlCredential.Password.MakeReadOnly()
         $sqlCred = New-Object System.Data.SqlClient.SqlCredential($SqlCredential.UserName, $SqlCredential.Password)
@@ -87,44 +88,37 @@ function ExecuteSqlQuery {
     $command = New-Object System.Data.SqlClient.SqlCommand($query, $connection)
     $command.CommandTimeout = 0
     $datatable = New-Object System.Data.DataTable
-    try 
-    {
+    try {
         $connection.Open()
         $datatable.Load($command.ExecuteReader())
-        $connection.Close()
     }
-    catch 
-    {
+    catch {
         throw $_.Exception
+    }
+    finally {
+        $connection.Dispose()
     }
     return $datatable
 }
 
 Function WriteLog {
     Param(
-        [ValidateSet("INFO","WARN","ERRO", "FATL", "DEBG", "CODE")]
+        [ValidateSet("INFO", "WARN", "ERRO", "FATL", "DEBG", "CODE")]
         [string]$Level = "INFO",
-        [Parameter(Mandatory=$True)]
+        [Parameter(Mandatory = $True)]
         [string]$Message
     )
 
     $stamp = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
     $line = "$Stamp $Level $RUN_UID $Message"
-    If($LogFile) 
-    {
-        Add-Content $LogFile -Value $line
-        Write-Verbose $line
-    }
-    Else 
-    {
-        switch ($Level) {
-            "WARN" { Write-Warning $line}
-            "ERRO" { Write-Error $line; $Script:ErrorCount++ }
-            "FATL" { Write-Error $line; $Script:ErrorCount++ }
-            "DEBG" { Write-Debug $line}
-            "INFO" { Write-Verbose $line}
-            "CODE" { Write-Information $line}
-        }
+    Add-Content $LogFile -Value $line
+    switch ($Level) {
+        "WARN" { Write-Warning $line}
+        "ERRO" { Write-Error $line; $Script:ErrorCount++ }
+        "FATL" { Write-Error $line; $Script:ErrorCount++ }
+        "DEBG" { Write-Verbose $line}
+        "INFO" { Write-Host $line}
+        "CODE" { Write-Verbose $line}
     }
 }
 function GetServerDetails {
@@ -169,8 +163,7 @@ LEFT JOIN sys.availability_groups ag ON drs.group_id = ag.group_id
 LEFT JOIN sys.dm_hadr_availability_group_states ags ON drs.group_id = ags.group_id
 WHERE dbs.state = 0;"
 
-    if($azure)
-    {
+    if ($azure) {
         $QUERY_DATABASES = "SELECT dbs.database_id, dbs.name as database_name, dbs.compatibility_level, dbs.user_access, dbs.is_read_only, dbs.recovery_model, dbs.recovery_model_desc,
 NEWID() AS database_guid,0 AS last_log_backup_lsn,
 @@SERVERNAME AS path_name, @@SERVERNAME AS primary_replica, 0 AS automated_backup_preference,
@@ -267,17 +260,14 @@ function IndexMaintenance {
             if ($index.partition_count -gt 1) {
                 $QUERY_REORGINDEX += " PARTITION = $($index.partition_number)"
             }
-            if($DoNotRebuildOnline -eq $false -and $rebuild -eq $true) {
-                if ($index.index_type -eq 1)
-                {
-                    if($index.ci_rebuilt_online -eq 1)
-                    {
+            if ($DoNotRebuildOnline -eq $false -and $rebuild -eq $true) {
+                if ($index.index_type -eq 1) {
+                    if ($index.ci_rebuilt_online -eq 1) {
                         $QUERY_REORGINDEX += " WITH (ONLINE = ON)"
                     }
                 }
                 elseif ($index.index_type -eq 2) {
-                    if($index.nci_rebuilt_online -eq 1)
-                    {
+                    if ($index.nci_rebuilt_online -eq 1) {
                         $QUERY_REORGINDEX += " WITH (ONLINE = ON)"
                     }
                 }
@@ -326,12 +316,10 @@ function ConsistencyCheck {
 
     [string]$DBCC_CHECKDB = "DBCC CHECKDB ([$($database.database_name)]) WITH NO_INFOMSGS, PHYSICAL_ONLY;"
     WriteLog -Level CODE -Message $DBCC_CHECKDB
-    try
-    {
+    try {
         ExecuteSqlQuery -connectionString $connectionString -query $DBCC_CHECKDB
     }
-    catch
-    {
+    catch {
         WriteLog -Level ERRO -Message $ERROR_DATABASE_CHECKDB
         WriteLog -Level DEBG -Message $_.Exception
     }
@@ -343,9 +331,12 @@ function BackupDatabase {
         $database
     )
 
-    $folder = ("$($BackupPath)\$($database.path_name)\$($database.database_name)\").ToLower()
-    if(!(Test-Path -Path $folder)) { $null = New-Item -Path $folder -ItemType Directory}
-    if(!(Test-Path -Path $folder)) { WriteLog -Level WARN -Message "There was an error creating the backuppath. Backups might fail."}
+    $folder = ""
+    if($BackupPath -ne "") {
+        $folder = ("$($BackupPath)\$($database.path_name)\$($database.database_name)\").ToLower()
+        if (!(Test-Path -Path $folder)) { $null = New-Item -Path $folder -ItemType Directory}
+        if (!(Test-Path -Path $folder)) { WriteLog -Level WARN -Message "There was an error creating the backuppath. Backups might fail."}
+    }
 
     $filename = ("$($folder)$($database.database_name)_$(Get-Date -Format yyyyMMddHHmmss)").ToLower()
     [string]$BACKUP_DATABASEFULL = "BACKUP DATABASE [$($database.database_name)] TO DISK = '$($filename)_FULL.bak'"
@@ -358,19 +349,18 @@ function BackupDatabase {
     [string]$type = $BackupType
     [bool]$isPreferredBackup = $database.preferred_replica
 
-    if($database.last_log_backup_lsn.ToString() -eq "" -and $database.recovery_model -ne 3)
-    {
+    if ($database.last_log_backup_lsn.ToString() -eq "" -and $database.recovery_model -ne 3 -and $database.is_read_only -eq 0) {
         $type = "Full"
         ## A full backup is not present. To circumvent this we will create a full backup but only on the primary
         ## The backup preference is ignored
         WriteLog -Level DEBG -Message "Database $($database.database_name) has no valid log backup yet. A full backup will be created first."
-        if($database.is_primary ) { $isPreferredBackup = $true} else {$isPreferredBackup = $false}
+        if ($database.is_primary ) { $isPreferredBackup = $true} else {$isPreferredBackup = $false}
     }
     [string]$sql = $BACKUP_DATABASEFULL
     switch ($type) {
         "Full" { 
-            if($isPreferredBackup) {
-                if(!$database.is_primary) { 
+            if ($isPreferredBackup) {
+                if (!$database.is_primary) { 
                     $sql += " WITH COPY_ONLY"
                 }
             }
@@ -379,34 +369,34 @@ function BackupDatabase {
             }
         }
         "Differential" {
-            if($database.is_primary -and $database.database_id -gt 1)
-            {
+            if ($database.is_primary -and $database.database_id -gt 1) {
                 $sql = $BACKUP_DATABASEDIFF
             }
         }
-        "Log"
-        {
-            if($database.recovery_model -ne 3)
-            {
-
-                if($isPreferredBackup)
-                {
+        "Log" {
+            if ($database.recovery_model -ne 3) {
+                if($database.is_read_only -eq 1) {
+                    WriteLog -Level INFO -Message "Skipping Log backup for database $($database.database_name) because it is read-only."
+                    $isPreferredBackup = $false
+                }
+                if ($isPreferredBackup) {
                     $sql = $BACKUP_DATABASELOG
                 }
+            }
+            else {
+                # Set preferred backup to false. This will skip the backup when the recovery model is SIMPLE
+                $isPreferredBackup = $false
             }
         }
     }
 
-    try 
-    {
-        if($database.preferred_replica)
-        {
+    try {
+        if ($isPreferredBackup) {
             WriteLog -Level CODE -Message $sql
             ExecuteSqlQuery -connectionString $connectionString -query $sql
         }
     }
-    catch 
-    {
+    catch {
         WriteLog -Level ERRO -Message $ERROR_DATABASE_BACKUP
         WriteLog -Level DEBG -Message $_.Exception.Message
     }
@@ -415,7 +405,15 @@ function BackupDatabase {
 
 ## Main Execution
 [string]$RunUid = [guid]::NewGuid().ToString()
-[string]$LogFile = "$($PSScriptRoot)\sqlmaint_$($SqlServer.Replace('\','_'))_$(Get-Date -Format yyyyMMdd).log"
+if($LogPath -eq "") {
+    $LogPath = $PSScriptRoot
+} else {
+    if(!(Test-Path $LogPath)) {
+        Write-Host "The logpath is invalid. Logs are written to the current path."
+        $LogPath = $PSScriptRoot
+    }
+}
+[string]$LogFile = "$($LogPath)\sqlmaint_$($SqlServer.Replace('\','_'))_$((Get-Date).ToUniversalTime().ToString("yyyyMMdd")).log"
 [int]$ErrorCount = 0;
 
 WriteLog -Level INFO -Message "Starting SQL Maintenance ON $($SqlServer)"
@@ -425,102 +423,100 @@ WriteLog -Level INFO -Message "Database consistency check is set to $($CheckData
 WriteLog -Level INFO -Message "Database backup is set to $($BackupDatabases)"
 WriteLog -Level INFO -Message "Database backup path is set to $($BackupPath)"
 WriteLog -Level INFO -Message "The current directory is $PSScriptRoot"
+WriteLog -Level INFO -Message "The current logfile is $LogFile"
 
-if($LowWaterMark -gt $HighWaterMark) 
-{
+if ($LowWaterMark -gt $HighWaterMark) {
     WriteLog -Level INFO -Message "The low watermark is set higher then the high watermark. The default values will be used."
     $LowWaterMark = 10
     $HighWaterMark = 30
 }
 
 $CONNECTION = "Data Source=$($SqlServer);Initial Catalog=master;Integrated Security=SSPI;Connection Timeout=5;App=SqlMaintenance"
-if($SqlCredential -ne $null)
-{
+if ($SqlCredential -ne $null) {
     $CONNECTION = "Data Source=$($SqlServer);Initial Catalog=master;Connection Timeout=5;App=SqlMaintenance"
 }
 $serverDetails = GetServerDetails -connectionString $CONNECTION
 WriteLog -Level DEBG -Message "Version is $($serverDetails.ProductVersion) $($serverDetails.Edition)"
-if($serverDetails.ProductVersion -eq $null)
-{
+if ($serverDetails.ProductVersion -eq $null) {
     WriteLog -Level FATL -Message $ERROR_SERVER_INFORMATION
     $Host.SetShouldExit(1)
     Exit
 }
 [int]$majorversion = ($serverDetails.ProductVersion.Split("."))[0]
 [bool]$isAzure = $false
+if($majorversion -lt 11) {
+    WriteLog -Level FATL -Message "This version of SQL Server is not supported. Exiting."
+    $Host.SetShouldExit(3)
+    Exit
+}
 
-if($serverDetails.Edition -like "*Azure*") { $isAzure = $true}
-if($Include.Count -gt 0 -and $Exclude.Count -gt 0)
-{
+if ($serverDetails.Edition -like "*Azure*") { $isAzure = $true}
+if ($Include.Count -gt 0 -and $Exclude.Count -gt 0) {
     WriteLog -Level INFO -Message "The inclusion list is ignored because there is also an exclusion list."
 }
 
 $dbs = GetDatabases -connectionString $CONNECTION -system -majorversion $majorversion -Azure $isAzure
 foreach ($db in $dbs) {
     [bool]$skip = $false
-    if($Exclude.Count -gt 0)
-    {
-        if($Exclude -Contains $db.database_name -or ($Exclude -Contains 'system' -and $db.database_id -lt 5))
-        {
+    if ($Exclude.Count -gt 0) {
+        if ($Exclude -Contains $db.database_name -or ($Exclude -Contains 'system' -and $db.database_id -lt 5)) {
             WriteLog -Level INFO -Message "Database $($db.database_name) is skipped because it is in an exclusion list."
             $skip = $true
         }
     }
-    else 
-    {
-        if($Include.Count -gt 0 -and (!($include -Contains $db.database_name) -and ($include -Contains 'system' -and $db.database_id -gt 4)))
-        {
+    else {
+        if ($Include.Count -gt 0 -and (!($include -Contains $db.database_name) -and ($include -Contains 'system' -and $db.database_id -gt 4))) {
             WriteLog -Level INFO -Message "Database $($db.database_name) is skipped because it is not in the included list."
             $skip = $true
         }
     }
-    if(!$skip)
-    {
+    if (!$skip) {
         WriteLog -Level INFO -Message "Changing database context to $($db.database_name)."
         WriteLog -Level CODE -Message "USE [$($db.database_name)]"
         $CONNECTION_DB = "Data Source=$($SqlServer);Initial Catalog=$($db.database_name);Connection Timeout=5;Integrated Security=SSPI;App=SqlMaintenance"
-        if($SqlCredential -ne $null)
-        {
+        if ($SqlCredential -ne $null) {
             $CONNECTION_DB = "Data Source=$($SqlServer);Initial Catalog=$($db.database_name);App=SqlMaintenance"
         }
-        if ($RebuildIndexes -and $db.database_id -gt 4 -and $db.primary_replica -eq $db.local_server_name) 
-        {
-            IndexMaintenance -connectionString $CONNECTION_DB -lowthreshold $LowWaterMark -highthreshold $HighWaterMark 
+        if ($RebuildIndexes -and $db.database_id -gt 4 -and $db.primary_replica -eq $db.local_server_name) {
+            if($db.is_read_only -eq 1 ) {
+                WriteLog -Level INFO -Message "Skipping index maintenance for database $($db.database_name) because it is read-only."
+            } else {
+                IndexMaintenance -connectionString $CONNECTION_DB -lowthreshold $LowWaterMark -highthreshold $HighWaterMark 
+            }
         }
 
-        if ($UpdateStatistics -and $db.database_id -gt 4 -and $db.primary_replica -eq $db.local_server_name) 
-        {
+        if ($UpdateStatistics -and $db.database_id -gt 4 -and $db.primary_replica -eq $db.local_server_name) {
+            if($db.is_read_only -eq 1 ) {
+                WriteLog -Level INFO -Message "Skipping statistics maintenance for database $($db.database_name) because it is read-only."
+            } else {            
             StatsMaintenance -connectionString $CONNECTION_DB
+            }
         }
 
-        if($CheckDatabases -and $db.database_id -ne 2 -and $db.primary_replica -eq $db.local_server_name) {
-            if($db.database_id -eq 1 -and $isAzure)
-            {
+        if ($CheckDatabases -and $db.database_id -ne 2 -and $db.primary_replica -eq $db.local_server_name) {
+            if ($db.database_id -eq 1 -and $isAzure) {
                 WriteLog -Level INFO -Message "Cannot perform DBCC CHECKDB on master database in Azure."
             }
-            else
-            {
+            if($db.is_read_only -eq 1 ) {
+                WriteLog -Level INFO -Message "Skipping consistency checks for database $($db.database_name) because it is read-only."
+            } else {
                 ConsistencyCheck -connectionString $CONNECTION_DB -database $db
             }
         }
 
-        if($BackupDatabases -and $db.database_id -ne 2) 
-        {
-            if($isAzure)
-            {
+        if ($BackupDatabases -and $db.database_id -ne 2) {
+            if ($isAzure) {
                 WriteLog -Level INFO -Message "Skipping backup. Database is on Azure and backup is not supported."
             }
-            else 
-            {
+            else {
                 BackupDatabase -connectionString $CONNECTION -database $db
             }
         }
     }
 }
-if($ErrorCount -gt 0) 
-{
-    WriteLog -Level INFO -Message "Finished SQL Maintenance with $($ErrorCount) errors"
+if ($ErrorCount -gt 0) {
+    WriteLog -Level INFO -Message "Finished SQL Maintenance with $($ErrorCount) errors."
     $Host.SetShouldExit(2)
     Exit
 }
-WriteLog -Level INFO -Message "Finished SQL Maintenance"
+WriteLog -Level INFO -Message "Finished SQL Maintenance with no errors."
