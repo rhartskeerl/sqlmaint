@@ -19,6 +19,8 @@
     Reorganize indexes when fragmentation is above 50 and rebuild indexes when fragmentation is above 80 on a single server. Never rebuild online.
     .PARAMETER SqlServer
     The name of the single server to perform activities on. Valid options are {ServerName}, {ServerName\InstanceName} or {ServerName,PortNumber}
+    .PARAMETER LogPath
+    Switch to set the log file path. Path will be verified, when it doesn't exist the local path will be used.
     .PARAMETER SqlCredential
     A PSCredential that stores the user information when SQL authentication is used. For Windows authentication this parameter can be omitted.
     .PARAMETER Include
@@ -35,6 +37,8 @@
     A number that determines the level of fragmentation before an index reorganization is considered.
     .PARAMETER HighWaterMark
     A number that determines the level of fragementation before an index rebuild is considered.
+    .PARAMETER CheckDatabases
+    Execute DBCC CHECKDB on the database. By default executes PHYSICAL_ONLY.
     .PARAMETER BackupDatabases
     A switch to determine whether or not to backup databases.
     .PARAMETER BackupPath
@@ -321,7 +325,7 @@ function ConsistencyCheck {
     }
     catch {
         WriteLog -Level ERRO -Message $ERROR_DATABASE_CHECKDB
-        WriteLog -Level DEBG -Message $_.Exception
+        WriteLog -Level DEBG -Message $_.Exception.Message
     }
 }
 
@@ -465,7 +469,7 @@ foreach ($db in $dbs) {
         }
     }
     else {
-        if ($Include.Count -gt 0 -and (!($include -Contains $db.database_name) -and ($include -Contains 'system' -and $db.database_id -gt 4))) {
+        if ($Include.Count -gt 0 -and (!($include -Contains $db.database_name) -and !($include -Contains 'system' -and $db.database_id -lt 5))) {
             WriteLog -Level INFO -Message "Database $($db.database_name) is skipped because it is not in the included list."
             $skip = $true
         }
