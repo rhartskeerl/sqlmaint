@@ -163,7 +163,7 @@ LEFT JOIN sys.availability_groups ag ON drs.group_id = ag.group_id
 LEFT JOIN sys.dm_hadr_availability_group_states ags ON drs.group_id = ags.group_id
 WHERE dbs.state = 0;"
 
-    if ($azure) {
+    if ($azure -or $majorversion -eq 10) {
         $QUERY_DATABASES = "SELECT dbs.database_id, dbs.name as database_name, dbs.compatibility_level, dbs.user_access, dbs.is_read_only, dbs.recovery_model, dbs.recovery_model_desc,
 NEWID() AS database_guid,0 AS last_log_backup_lsn,
 @@SERVERNAME AS path_name, @@SERVERNAME AS primary_replica, 0 AS automated_backup_preference,
@@ -220,18 +220,13 @@ function GetStatistics {
 	ISNULL(modification_counter, -1) AS [stats_modification_counter],
 	dsp.rows_sampled,
 	dsp.last_updated,
-	sum(reserved_page_count*8.0)/1024 AS [table_size],
-	SUM(ps.row_count) AS row_count
+	dsp.rows AS row_count
 FROM sys.stats st
 INNER JOIN sys.objects o on st.object_id = o.object_id
 INNER JOIN sys.schemas s ON s.schema_id = o.schema_id
-INNER JOIN sys.dm_db_partition_stats AS ps on o.object_id = ps.object_id
 CROSS APPLY sys.dm_db_stats_properties(st.object_id, st.stats_id) dsp
 WHERE 
-	o.is_ms_shipped = 0
-GROUP BY 
-	s.name, o.name, st.name, ISNULL(dsp.rows, -1), 
-	ISNULL(modification_counter, -1), dsp.rows_sampled,	dsp.last_updated;"
+	o.is_ms_shipped = 0;"
 
     return ExecuteSqlQuery -connectionString $connectionString -query $QUERY_STATS
 }
@@ -328,7 +323,8 @@ function ConsistencyCheck {
 function BackupDatabase {
     Param(
         [string]$connectionString,
-        $database
+        $database,
+        [string]$lastbackuplsn
     )
 
     $folder = ""
@@ -349,7 +345,7 @@ function BackupDatabase {
     [string]$type = $BackupType
     [bool]$isPreferredBackup = $database.preferred_replica
 
-    if ($database.last_log_backup_lsn.ToString() -eq "" -and $database.recovery_model -ne 3 -and $database.is_read_only -eq 0) {
+    if ($lastbackuplsn -eq "" -and $database.recovery_model -ne 3 -and $database.is_read_only -eq 0) {
         $type = "Full"
         ## A full backup is not present. To circumvent this we will create a full backup but only on the primary
         ## The backup preference is ignored
@@ -444,7 +440,7 @@ if ($serverDetails.ProductVersion -eq $null) {
 }
 [int]$majorversion = ($serverDetails.ProductVersion.Split("."))[0]
 [bool]$isAzure = $false
-if($majorversion -lt 11) {
+if($majorversion -lt 10) {
     WriteLog -Level FATL -Message "This version of SQL Server is not supported. Exiting."
     $Host.SetShouldExit(3)
     Exit
@@ -504,12 +500,20 @@ foreach ($db in $dbs) {
             }
         }
 
+        [string]$lastbackuplsn = $db.last_log_backup_lsn
         if ($BackupDatabases -and $db.database_id -ne 2) {
             if ($isAzure) {
                 WriteLog -Level INFO -Message "Skipping backup. Database is on Azure and backup is not supported."
             }
             else {
-                BackupDatabase -connectionString $CONNECTION -database $db
+                if($majorversion -eq 10) {
+                    $dbinfo = ExecuteSqlQuery -connectionString $CONNECTION_DB -query "DBCC DBINFO() WITH TABLERESULTS"
+                    $lastlog = $dbinfo | Where-Object { $_.Field -eq "dbi_LastLogBackupTime"} | Select-Object -First 1
+                    if($lastlog.VALUE -eq "1900-01-01 00:00:00.000") {
+                        $lastbackuplsn = ""
+                    }
+                }
+                BackupDatabase -connectionString $CONNECTION -database $db -lastbackuplsn $lastbackuplsn
             }
         }
     }
